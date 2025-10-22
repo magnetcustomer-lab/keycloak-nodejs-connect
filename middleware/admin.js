@@ -41,12 +41,12 @@ function adminLogout (request, response, keycloak) {
     const token = new Token(data)
     let signature
     try {
-      signature = new Signature(keycloak.config)
+      signature = new Signature(keycloak.getConfig(request))
       signature.verify(token).then(token => {
         if (token.content.action === 'LOGOUT') {
           const sessionIDs = token.content.adapterSessionIds
           if (!sessionIDs) {
-            keycloak.grantManager.notBefore = token.content.notBefore
+            keycloak.getGrantManager(request).notBefore = token.content.notBefore
             response.send('ok')
             return
           }
@@ -84,10 +84,10 @@ function adminNotBefore (request, response, keycloak) {
     const token = new Token(data)
     let signature
     try {
-      signature = new Signature(keycloak.config)
+      signature = new Signature(keycloak.getConfig(request))
       signature.verify(token).then(token => {
         if (token.content.action === 'PUSH_NOT_BEFORE') {
-          keycloak.grantManager.notBefore = token.content.notBefore
+          keycloak.getGrantManager(request).notBefore = token.content.notBefore
           response.send('ok')
         }
       }).catch((err) => {

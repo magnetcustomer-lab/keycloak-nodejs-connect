@@ -31,7 +31,7 @@ function forceLogin (keycloak, request, response) {
   }
 
   const uuid = UUID()
-  const loginURL = keycloak.loginUrl(uuid, redirectUrl)
+  const loginURL = keycloak.loginUrl(request, uuid, redirectUrl)
   response.redirect(loginURL)
 }
 

@@ -40,7 +40,7 @@ module.exports = function (keycloak, logoutUrl) {
       const port = headerHost[1] || ''
       redirectUrl = request.protocol + '://' + host + (port === '' ? '' : ':' + port) + '/'
     }
-    const keycloakLogoutUrl = keycloak.logoutUrl(redirectUrl, idTokenHint)
+    const keycloakLogoutUrl = keycloak.logoutUrl(request, redirectUrl, idTokenHint)
 
     response.redirect(keycloakLogoutUrl)
   }
