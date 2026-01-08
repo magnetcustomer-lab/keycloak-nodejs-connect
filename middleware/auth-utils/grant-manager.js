@@ -23,6 +23,7 @@ const querystring = require('querystring')
 const Grant = require('./grant')
 const Token = require('./token')
 const Rotation = require('./rotation')
+const { getGlobalMetrics } = require('./metrics')
 
 /**
  * Construct a grant manager.
@@ -41,6 +42,12 @@ function GrantManager (config) {
   this.notBefore = 0
   this.rotation = new Rotation(config)
   this.verifyTokenAudience = config.verifyTokenAudience
+  this.httpTimeout = config.httpTimeout || 30000
+  this.maxRetries = config.maxRetries || 3
+  this.retryBaseDelay = config.retryBaseDelay || 1000
+  this.trustedAzp = config.trustedAzp || []
+  this.logger = config.logger || console
+  this.metrics = config.metrics || getGlobalMetrics()
 }
 
 /**
@@ -213,6 +220,57 @@ GrantManager.prototype.obtainFromClientCredentials = function obtainFromlientCre
   const options = postOptions(this)
 
   return nodeify(fetch(this, handler, options, params), callback)
+}
+
+GrantManager.prototype.exchangeToken = function exchangeToken (options, callback) {
+  const subjectToken = typeof options.subjectToken === 'object'
+    ? options.subjectToken.token
+    : options.subjectToken
+
+  const params = {
+    grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+    subject_token: subjectToken,
+    subject_token_type: options.subjectTokenType || 'urn:ietf:params:oauth:token-type:access_token',
+    client_id: this.clientId
+  }
+
+  if (options.audience) {
+    params.audience = options.audience
+  }
+
+  if (options.requestedTokenType) {
+    params.requested_token_type = options.requestedTokenType
+  }
+
+  if (options.scope) {
+    params.scope = options.scope
+  }
+
+  if (options.actorToken) {
+    const actorToken = typeof options.actorToken === 'object'
+      ? options.actorToken.token
+      : options.actorToken
+    params.actor_token = actorToken
+    params.actor_token_type = options.actorTokenType || 'urn:ietf:params:oauth:token-type:access_token'
+  }
+
+  const handler = createHandler(this)
+  const requestOptions = postOptions(this)
+
+  this.metrics.incrementCounter('tokenRefresh', 'total')
+  const self = this
+
+  const promise = fetch(this, handler, requestOptions, params)
+    .then(grant => {
+      self.metrics.incrementCounter('tokenRefresh', 'success')
+      return grant
+    })
+    .catch(err => {
+      self.metrics.incrementCounter('tokenRefresh', 'failed')
+      throw err
+    })
+
+  return nodeify(promise, callback)
 }
 
 /**
@@ -414,57 +472,76 @@ GrantManager.prototype.validateGrant = function validateGrant (grant) {
  * @return {Promise} That resolve a token
  */
 GrantManager.prototype.validateToken = function validateToken (token, expectedType) {
+  const startTime = Date.now()
+  const self = this
+  this.metrics.incrementCounter('tokenValidations', 'total')
+
   return new Promise((resolve, reject) => {
+    const recordAndReject = (err) => {
+      self.metrics.incrementCounter('tokenValidations', 'failed')
+      self.metrics.recordDuration('tokenValidationDuration', Date.now() - startTime)
+      reject(err)
+    }
+    const recordAndResolve = (result) => {
+      self.metrics.incrementCounter('tokenValidations', 'success')
+      self.metrics.recordDuration('tokenValidationDuration', Date.now() - startTime)
+      resolve(result)
+    }
+
     if (!token) {
-      reject(new Error('invalid token (missing)'))
+      recordAndReject(new Error('invalid token (missing)'))
     } else if (token.isExpired()) {
-      reject(new Error('invalid token (expired)'))
+      recordAndReject(new Error('invalid token (expired)'))
     } else if (!token.signed) {
-      reject(new Error('invalid token (not signed)'))
+      recordAndReject(new Error('invalid token (not signed)'))
     } else if (token.content.typ !== expectedType) {
-      reject(new Error('invalid token (wrong type)'))
+      recordAndReject(new Error('invalid token (wrong type)'))
     } else if (token.content.iat < this.notBefore) {
-      reject(new Error('invalid token (stale token)'))
+      recordAndReject(new Error('invalid token (stale token)'))
     } else if (token.content.iss !== this.realmUrl) {
-      reject(new Error('invalid token (wrong ISS)'))
+      recordAndReject(new Error('invalid token (wrong ISS)'))
     } else {
       const audienceData = Array.isArray(token.content.aud) ? token.content.aud : [token.content.aud]
       if (expectedType === 'ID') {
         if (!audienceData.includes(this.clientId)) {
-          reject(new Error('invalid token (wrong audience)'))
+          recordAndReject(new Error('invalid token (wrong audience)'))
+          return
         }
         if (token.content.azp && token.content.azp !== this.clientId) {
-          reject(new Error('invalid token (authorized party should match client id)'))
+          const azpAllowed = this.trustedAzp.includes(token.content.azp)
+          if (!azpAllowed) {
+            recordAndReject(new Error('invalid token (authorized party should match client id or be in trusted list)'))
+            return
+          }
         }
       } else if (this.verifyTokenAudience) {
         if (!audienceData.includes(this.clientId)) {
-          reject(new Error('invalid token (wrong audience)'))
+          recordAndReject(new Error('invalid token (wrong audience)'))
+          return
         }
       }
       const verify = crypto.createVerify('RSA-SHA256')
-      // if public key has been supplied use it to validate token
       if (this.publicKey) {
         try {
           verify.update(token.signed)
           if (!verify.verify(this.publicKey, token.signature, 'base64')) {
-            reject(new Error('invalid token (signature)'))
+            recordAndReject(new Error('invalid token (signature)'))
           } else {
-            resolve(token)
+            recordAndResolve(token)
           }
         } catch (err) {
-          reject(new Error('Misconfigured parameters while validating token. Check your keycloak.json file!'))
+          recordAndReject(new Error('Misconfigured parameters while validating token. Check your keycloak.json file!'))
         }
       } else {
-        // retrieve public KEY and use it to validate token
         this.rotation.getJWK(token.header.kid).then(key => {
           verify.update(token.signed)
           if (!verify.verify(key, token.signature)) {
-            reject(new Error('invalid token (public key signature)'))
+            recordAndReject(new Error('invalid token (public key signature)'))
           } else {
-            resolve(token)
+            recordAndResolve(token)
           }
         }).catch((err) => {
-          reject(new Error('failed to load public key to verify token. Reason: ' + err.message))
+          recordAndReject(new Error('failed to load public key to verify token. Reason: ' + err.message))
         })
       }
     }
@@ -514,27 +591,84 @@ const postOptions = (manager, path) => {
   return opts
 }
 
-const fetch = (manager, handler, options, params) => {
+const fetch = (manager, handler, options, params, attempt = 0) => {
+  const startTime = Date.now()
+  if (attempt === 0) {
+    manager.metrics.incrementCounter('httpRequests', 'total')
+  } else {
+    manager.metrics.incrementCounter('httpRequests', 'retries')
+  }
+
   return new Promise((resolve, reject) => {
     const data = (typeof params === 'string' ? params : querystring.stringify(params))
     options.headers['Content-Length'] = data.length
 
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), manager.httpTimeout)
+
     const req = getProtocol(options).request(options, (response) => {
+      clearTimeout(timeoutId)
       if (response.statusCode < 200 || response.statusCode > 299) {
         response.destroy()
-        return reject(new Error(response.statusCode + ':' + http.STATUS_CODES[response.statusCode]))
+        const err = new Error(response.statusCode + ':' + http.STATUS_CODES[response.statusCode])
+        return handleFetchRetry(manager, err, handler, options, params, attempt, resolve, reject, startTime)
       }
       let json = ''
       response.on('data', (d) => (json += d.toString()))
       response.on('end', () => {
+        manager.metrics.incrementCounter('httpRequests', 'success')
+        manager.metrics.recordDuration('httpRequestDuration', Date.now() - startTime)
         handler(resolve, reject, json)
       })
     })
 
+    controller.signal.addEventListener('abort', () => {
+      req.destroy()
+      manager.metrics.incrementCounter('httpRequests', 'timeouts')
+      const err = new Error(`Request timeout after ${manager.httpTimeout}ms`)
+      handleFetchRetry(manager, err, handler, options, params, attempt, resolve, reject, startTime)
+    })
+
     req.write(data)
-    req.on('error', reject)
+    req.on('error', (err) => {
+      clearTimeout(timeoutId)
+      handleFetchRetry(manager, err, handler, options, params, attempt, resolve, reject, startTime)
+    })
     req.end()
   })
+}
+
+const handleFetchRetry = (manager, err, handler, options, params, attempt, resolve, reject, startTime) => {
+  const isRetryable = isRetryableError(err)
+  if (isRetryable && attempt < manager.maxRetries - 1) {
+    const delay = manager.retryBaseDelay * Math.pow(2, attempt)
+    manager.logger.warn && manager.logger.warn(`Request attempt ${attempt + 1} failed: ${err.message}. Retrying in ${delay}ms`)
+    setTimeout(() => {
+      fetch(manager, handler, options, params, attempt + 1)
+        .then(resolve)
+        .catch(reject)
+    }, delay)
+  } else {
+    manager.metrics.incrementCounter('httpRequests', 'failed')
+    manager.metrics.recordDuration('httpRequestDuration', Date.now() - startTime)
+    if (attempt > 0) {
+      manager.logger.error && manager.logger.error(`Request failed after ${attempt + 1} attempts: ${err.message}`)
+    }
+    reject(err)
+  }
+}
+
+const isRetryableError = (err) => {
+  if (err.message.includes('timeout')) return true
+  if (err.message.includes('ECONNRESET')) return true
+  if (err.message.includes('ETIMEDOUT')) return true
+  if (err.message.includes('ECONNREFUSED')) return true
+  const statusMatch = err.message.match(/^(\d+):/)
+  if (statusMatch) {
+    const status = parseInt(statusMatch[1], 10)
+    return status >= 500 || status === 429
+  }
+  return false
 }
 
 module.exports = GrantManager

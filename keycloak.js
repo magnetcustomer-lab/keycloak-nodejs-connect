@@ -30,6 +30,7 @@ const GrantAttacher = require('./middleware/grant-attacher')
 const Protect = require('./middleware/protect')
 const Enforcer = require('./middleware/enforcer')
 const CheckSso = require('./middleware/check-sso')
+const { getGlobalMetrics, KeycloakMetrics } = require('./middleware/auth-utils/metrics')
 
 /**
  * Instantiate a Keycloak.
@@ -60,89 +61,88 @@ const CheckSso = require('./middleware/check-sso')
  * @return     {Keycloak}  A constructed Keycloak object.
  *
  */
-function Keycloak(config, keycloakConfig) {
-    if (!config) {
-        throw new Error('Adapter configuration must be provided.')
+function Keycloak (config, keycloakConfig) {
+  if (!config) {
+    throw new Error('Adapter configuration must be provided.')
+  }
+
+  if (config && config.store && config.cookies) {
+    throw new Error('Either `store` or `cookies` may be set, but not both')
+  }
+
+  // If keycloakConfig is null, Config() will search for `keycloak.json`.
+  const configs = Array.isArray(keycloakConfig) ? keycloakConfig.map(kcRealmConfig => new Config(kcRealmConfig)) : [new Config(keycloakConfig)]
+
+  configs.forEach(realmConfig => {
+    // Add the custom scope value
+    realmConfig.scope = config.scope
+    realmConfig.idpHint = config.idpHint
+  })
+
+  // Index configs by clientId instead of realm to support multiple clients per realm
+  this.configs = configs.reduce((previous, realmConfig) => Object.assign(previous, { [realmConfig.clientId]: realmConfig }), {})
+
+  this.grantManagers = configs.reduce((previous, realmConfig) => Object.assign(previous, { [realmConfig.clientId]: new GrantManager(realmConfig) }), {})
+
+  // Keep a map of realm -> clientIds for fallback resolution
+  this.realmToClientIds = configs.reduce((previous, realmConfig) => {
+    if (!previous[realmConfig.realm]) {
+      previous[realmConfig.realm] = []
     }
+    previous[realmConfig.realm].push(realmConfig.clientId)
+    return previous
+  }, {})
 
-    if (config && config.store && config.cookies) {
-        throw new Error('Either `store` or `cookies` may be set, but not both')
+  // Keep a default clientId per realm (first registered)
+  this.defaultClientByRealm = configs.reduce((previous, realmConfig) => {
+    if (!previous[realmConfig.realm]) {
+      previous[realmConfig.realm] = realmConfig.clientId
     }
+    return previous
+  }, {})
 
-    // If keycloakConfig is null, Config() will search for `keycloak.json`.
-    const configs = Array.isArray(keycloakConfig) ? keycloakConfig.map(kcRealmConfig => new Config(kcRealmConfig)) : [new Config(keycloakConfig)];
+  this.stores = [BearerStore]
 
-    configs.forEach(realmConfig => {
-        // Add the custom scope value
-        realmConfig.scope = config.scope;
-        realmConfig.idpHint = config.idpHint;
-    });
+  if (config && config.store) {
+    this.stores.push(new SessionStore(config.store))
+  } else if (config && config.cookies) {
+    this.stores.push(CookieStore)
+  }
 
-    // Index configs by clientId instead of realm to support multiple clients per realm
-    this.configs = configs.reduce((previous, realmConfig) => Object.assign(previous, {[realmConfig.clientId]: realmConfig}), {});
-
-    this.grantManagers = configs.reduce((previous, realmConfig) => Object.assign(previous, {[realmConfig.clientId]: new GrantManager(realmConfig)}), {});
-
-    // Keep a map of realm -> clientIds for fallback resolution
-    this.realmToClientIds = configs.reduce((previous, realmConfig) => {
-        if (!previous[realmConfig.realm]) {
-            previous[realmConfig.realm] = [];
-        }
-        previous[realmConfig.realm].push(realmConfig.clientId);
-        return previous;
-    }, {});
-
-    // Keep a default clientId per realm (first registered)
-    this.defaultClientByRealm = configs.reduce((previous, realmConfig) => {
-        if (!previous[realmConfig.realm]) {
-            previous[realmConfig.realm] = realmConfig.clientId;
-        }
-        return previous;
-    }, {});
-
-    this.stores = [BearerStore];
-
-    if (config && config.store) {
-        this.stores.push(new SessionStore(config.store))
-    } else if (config && config.cookies) {
-        this.stores.push(CookieStore)
-    }
-
-    this.configConnector = config;
+  this.configConnector = config
 }
 
 Keycloak.prototype.setConfig = function (keycloakConfig) {
-    // If keycloakConfig is null, Config() will search for `keycloak.json`.
-    const configs = Array.isArray(keycloakConfig) ? keycloakConfig.map(kcRealmConfig => new Config(kcRealmConfig)) : [new Config(keycloakConfig)];
+  // If keycloakConfig is null, Config() will search for `keycloak.json`.
+  const configs = Array.isArray(keycloakConfig) ? keycloakConfig.map(kcRealmConfig => new Config(kcRealmConfig)) : [new Config(keycloakConfig)]
 
-    configs.forEach(realmConfig => {
-        // Add the custom scope value
-        realmConfig.scope = this.configConnector.scope;
-        realmConfig.idpHint = this.configConnector.idpHint;
-    });
+  configs.forEach(realmConfig => {
+    // Add the custom scope value
+    realmConfig.scope = this.configConnector.scope
+    realmConfig.idpHint = this.configConnector.idpHint
+  })
 
-    // Index configs by clientId instead of realm to support multiple clients per realm
-    this.configs = configs.reduce((previous, realmConfig) => Object.assign(previous, {[realmConfig.clientId]: realmConfig}), {});
+  // Index configs by clientId instead of realm to support multiple clients per realm
+  this.configs = configs.reduce((previous, realmConfig) => Object.assign(previous, { [realmConfig.clientId]: realmConfig }), {})
 
-    this.grantManagers = configs.reduce((previous, realmConfig) => Object.assign(previous, {[realmConfig.clientId]: new GrantManager(realmConfig)}), {});
+  this.grantManagers = configs.reduce((previous, realmConfig) => Object.assign(previous, { [realmConfig.clientId]: new GrantManager(realmConfig) }), {})
 
-    // Keep a map of realm -> clientIds for fallback resolution
-    this.realmToClientIds = configs.reduce((previous, realmConfig) => {
-        if (!previous[realmConfig.realm]) {
-            previous[realmConfig.realm] = [];
-        }
-        previous[realmConfig.realm].push(realmConfig.clientId);
-        return previous;
-    }, {});
+  // Keep a map of realm -> clientIds for fallback resolution
+  this.realmToClientIds = configs.reduce((previous, realmConfig) => {
+    if (!previous[realmConfig.realm]) {
+      previous[realmConfig.realm] = []
+    }
+    previous[realmConfig.realm].push(realmConfig.clientId)
+    return previous
+  }, {})
 
-    // Keep a default clientId per realm (first registered)
-    this.defaultClientByRealm = configs.reduce((previous, realmConfig) => {
-        if (!previous[realmConfig.realm]) {
-            previous[realmConfig.realm] = realmConfig.clientId;
-        }
-        return previous;
-    }, {});
-
+  // Keep a default clientId per realm (first registered)
+  this.defaultClientByRealm = configs.reduce((previous, realmConfig) => {
+    if (!previous[realmConfig.realm]) {
+      previous[realmConfig.realm] = realmConfig.clientId
+    }
+    return previous
+  }, {})
 }
 
 /**
@@ -168,39 +168,39 @@ Keycloak.prototype.setConfig = function (keycloakConfig) {
  * @param {Object} options Optional options for specifying details.
  */
 Keycloak.prototype.middleware = function (options) {
-    if (!options) {
-        options = {logout: '', admin: ''}
+  if (!options) {
+    options = { logout: '', admin: '' }
+  }
+
+  options.logout = options.logout || '/logout'
+  options.admin = options.admin || '/'
+
+  // clientResolve extracts clientId from token's azp claim, falling back to configured default
+  const clientResolve = options.clientResolve || ((request) => {
+    // If only one client, use it directly
+    if (Object.keys(this.configs).length === 1) {
+      return Object.keys(this.configs)[0]
     }
+    // Otherwise, return null to let Setup middleware extract from token
+    return null
+  })
 
-    options.logout = options.logout || '/logout'
-    options.admin = options.admin || '/'
+  // realmResolve is now used for extracting realm from token issuer
+  const resolver = options.realmResolve || ((request) => {
+    // Default: extract realm from issuer or use first available
+    const firstConfig = this.configs[Object.keys(this.configs)[0]]
+    return firstConfig ? firstConfig.realm : null
+  })
 
-    // clientResolve extracts clientId from token's azp claim, falling back to configured default
-    const clientResolve = options.clientResolve || ((request) => {
-        // If only one client, use it directly
-        if (Object.keys(this.configs).length === 1) {
-            return Object.keys(this.configs)[0];
-        }
-        // Otherwise, return null to let Setup middleware extract from token
-        return null;
-    });
+  const middlewares = []
 
-    // realmResolve is now used for extracting realm from token issuer
-    const resolver = options.realmResolve || ((request) => {
-        // Default: extract realm from issuer or use first available
-        const firstConfig = this.configs[Object.keys(this.configs)[0]];
-        return firstConfig ? firstConfig.realm : null;
-    });
+  middlewares.push(Setup(resolver, clientResolve, this))
+  middlewares.push(PostAuth(this))
+  middlewares.push(Admin(this, options.admin))
+  middlewares.push(GrantAttacher(this))
+  middlewares.push(Logout(this, options.logout))
 
-    const middlewares = []
-
-    middlewares.push(Setup(resolver, clientResolve, this))
-    middlewares.push(PostAuth(this))
-    middlewares.push(Admin(this, options.admin))
-    middlewares.push(GrantAttacher(this))
-    middlewares.push(Logout(this, options.logout))
-
-    return middlewares
+  return middlewares
 }
 
 /**
@@ -263,7 +263,7 @@ Keycloak.prototype.middleware = function (options) {
  * @param {String} spec The protection spec (optional)
  */
 Keycloak.prototype.protect = function (spec) {
-    return Protect(this, spec)
+  return Protect(this, spec)
 }
 
 /**
@@ -315,7 +315,7 @@ Keycloak.prototype.protect = function (spec) {
  * @param {String[]} expectedPermissions A single string representing a permission or an array of strings representing the permissions. For instance, 'item:read' or ['item:read', 'item:write'].
  */
 Keycloak.prototype.enforcer = function (permissions, config) {
-    return new Enforcer(this, config).enforce(permissions)
+  return new Enforcer(this, config).enforce(permissions)
 }
 
 /**
@@ -327,7 +327,7 @@ Keycloak.prototype.enforcer = function (permissions, config) {
  *
  */
 Keycloak.prototype.checkSso = function () {
-    return CheckSso(this)
+  return CheckSso(this)
 }
 
 /**
@@ -348,7 +348,7 @@ Keycloak.prototype.checkSso = function () {
  * @param {Object} request The HTTP request.
  */
 Keycloak.prototype.authenticated = function (request) {
-    // no-op
+  // no-op
 }
 
 /**
@@ -361,7 +361,7 @@ Keycloak.prototype.authenticated = function (request) {
  * @param {Object} request The HTTP request.
  */
 Keycloak.prototype.deauthenticated = function (request) {
-    // no-op
+  // no-op
 }
 
 /**
@@ -376,120 +376,120 @@ Keycloak.prototype.deauthenticated = function (request) {
  * application would prefer to render a fancy template.
  */
 Keycloak.prototype.accessDenied = function (request, response) {
-    response.status(403)
-    response.end('Access denied')
+  response.status(403)
+  response.end('Access denied')
 }
 
 /*! ignore */
 Keycloak.prototype.getGrant = function (request, response) {
-    let rawData
+  let rawData
 
-    for (let i = 0; i < this.stores.length; ++i) {
-        rawData = this.stores[i].get(request)
-        if (rawData) {
-            // store = this.stores[i];
-            break
-        }
+  for (let i = 0; i < this.stores.length; ++i) {
+    rawData = this.stores[i].get(request)
+    if (rawData) {
+      // store = this.stores[i];
+      break
     }
+  }
 
-    let grantData = rawData
-    if (typeof (grantData) === 'string') {
-        grantData = JSON.parse(grantData)
-    }
+  let grantData = rawData
+  if (typeof (grantData) === 'string') {
+    grantData = JSON.parse(grantData)
+  }
 
-    if (grantData && !grantData.error) {
-        const self = this
+  if (grantData && !grantData.error) {
+    const self = this
 
-        const grantManager = this.getGrantManager(request);
-        return grantManager.createGrant(JSON.stringify(grantData))
-            .then(grant => {
-                self.storeGrant(grant, request, response);
-                return grant;
-            })
-            .catch(() => {
-                return Promise.reject(new Error('Could not store grant code error'))
-            })
-    }
+    const grantManager = this.getGrantManager(request)
+    return grantManager.createGrant(JSON.stringify(grantData))
+      .then(grant => {
+        self.storeGrant(grant, request, response)
+        return grant
+      })
+      .catch(() => {
+        return Promise.reject(new Error('Could not store grant code error'))
+      })
+  }
 
-    return Promise.reject(new Error('Could not obtain grant code error'))
+  return Promise.reject(new Error('Could not obtain grant code error'))
 }
 
 Keycloak.prototype.getGrantManager = function (request) {
-    // First try to get by clientId (preferred for multi-client per realm)
-    if (request.kauth.clientId && this.grantManagers[request.kauth.clientId]) {
-        return this.grantManagers[request.kauth.clientId];
-    }
-    // Fallback to default client for realm (legacy compatibility)
-    const defaultClientId = this.defaultClientByRealm[request.kauth.realmName];
-    return this.grantManagers[defaultClientId];
-};
+  // First try to get by clientId (preferred for multi-client per realm)
+  if (request.kauth.clientId && this.grantManagers[request.kauth.clientId]) {
+    return this.grantManagers[request.kauth.clientId]
+  }
+  // Fallback to default client for realm (legacy compatibility)
+  const defaultClientId = this.defaultClientByRealm[request.kauth.realmName]
+  return this.grantManagers[defaultClientId]
+}
 
 Keycloak.prototype.getConfig = function (request) {
-    // First try to get by clientId (preferred for multi-client per realm)
-    if (request.kauth.clientId && this.configs[request.kauth.clientId]) {
-        return this.configs[request.kauth.clientId];
-    }
-    // Fallback to default client for realm (legacy compatibility)
-    const defaultClientId = this.defaultClientByRealm[request.kauth.realmName];
-    return this.configs[defaultClientId];
-};
+  // First try to get by clientId (preferred for multi-client per realm)
+  if (request.kauth.clientId && this.configs[request.kauth.clientId]) {
+    return this.configs[request.kauth.clientId]
+  }
+  // Fallback to default client for realm (legacy compatibility)
+  const defaultClientId = this.defaultClientByRealm[request.kauth.realmName]
+  return this.configs[defaultClientId]
+}
 
 Keycloak.prototype.storeGrant = function (grant, request, response) {
-    if (this.stores.length < 2 || BearerStore.get(request)) {
-        // cannot store bearer-only, and should not store if grant is from the
-        // authorization header
-        return
-    }
-    if (!grant) {
-        this.accessDenied(request, response)
-        return
-    }
+  if (this.stores.length < 2 || BearerStore.get(request)) {
+    // cannot store bearer-only, and should not store if grant is from the
+    // authorization header
+    return
+  }
+  if (!grant) {
+    this.accessDenied(request, response)
+    return
+  }
 
-    this.stores[1].wrap(grant)
-    grant.store(request, response)
-    return grant
+  this.stores[1].wrap(grant)
+  grant.store(request, response)
+  return grant
 }
 
 Keycloak.prototype.unstoreGrant = function (sessionId) {
-    if (this.stores.length < 2) {
-        // cannot unstore, bearer-only, this is weird
-        return
-    }
+  if (this.stores.length < 2) {
+    // cannot unstore, bearer-only, this is weird
+    return
+  }
 
-    this.stores[1].clear(sessionId)
+  this.stores[1].clear(sessionId)
 }
 
 Keycloak.prototype.getGrantFromCode = function (code, request, response) {
-    if (this.stores.length < 2) {
-        // bearer-only, cannot do this;
-        throw new Error('Cannot exchange code for grant in bearer-only mode')
-    }
+  if (this.stores.length < 2) {
+    // bearer-only, cannot do this;
+    throw new Error('Cannot exchange code for grant in bearer-only mode')
+  }
 
-    const sessionId = request.session.id
+  const sessionId = request.session.id
 
-    const self = this
-    return this.getGrantManager(request).obtainFromCode(request, code, sessionId)
-        .then(function (grant) {
-            self.storeGrant(grant, request, response)
-            return grant
-        })
+  const self = this
+  return this.getGrantManager(request).obtainFromCode(request, code, sessionId)
+    .then(function (grant) {
+      self.storeGrant(grant, request, response)
+      return grant
+    })
 }
 
 Keycloak.prototype.checkPermissions = function (authzRequest, request, callback) {
-    const self = this
-    return this.getGrantManager(request).checkPermissions(authzRequest, request, callback)
-        .then(function (grant) {
-            if (!authzRequest.response_mode) {
-                self.storeGrant(grant, request)
-            }
-            return grant
-        })
+  const self = this
+  return this.getGrantManager(request).checkPermissions(authzRequest, request, callback)
+    .then(function (grant) {
+      if (!authzRequest.response_mode) {
+        self.storeGrant(grant, request)
+      }
+      return grant
+    })
 }
 
 Keycloak.prototype.loginUrl = function (request, uuid, redirectUrl) {
-    const config = this.getConfig(request);
+  const config = this.getConfig(request)
 
-    let url = config.realmUrl +
+  let url = config.realmUrl +
         '/protocol/openid-connect/auth' +
         '?client_id=' + encodeURIComponent(config.clientId) +
         '&state=' + encodeURIComponent(uuid) +
@@ -497,37 +497,51 @@ Keycloak.prototype.loginUrl = function (request, uuid, redirectUrl) {
         '&scope=' + encodeURIComponent(config.scope ? 'openid ' + config.scope : 'openid') +
         '&response_type=code'
 
-    if (config && config.idpHint) {
-        url += '&kc_idp_hint=' + encodeURIComponent(config.idpHint)
-    }
-    return url
+  if (config && config.idpHint) {
+    url += '&kc_idp_hint=' + encodeURIComponent(config.idpHint)
+  }
+  return url
 }
 
 Keycloak.prototype.logoutUrl = function (request, redirectUrl, idTokenHint) {
-    const config = this.getConfig(request);
+  const config = this.getConfig(request)
 
-    const url = new URL(config.realmUrl + '/protocol/openid-connect/logout')
+  const url = new URL(config.realmUrl + '/protocol/openid-connect/logout')
 
-    if (redirectUrl && idTokenHint) {
-        url.searchParams.set('id_token_hint', idTokenHint)
-        url.searchParams.set('post_logout_redirect_uri', redirectUrl)
-    }
+  if (redirectUrl && idTokenHint) {
+    url.searchParams.set('id_token_hint', idTokenHint)
+    url.searchParams.set('post_logout_redirect_uri', redirectUrl)
+  }
 
-    return url.toString()
+  return url.toString()
 }
 
 Keycloak.prototype.accountUrl = function (request) {
-    const config = this.getConfig(request);
+  const config = this.getConfig(request)
 
-    return config.realmUrl + '/account'
+  return config.realmUrl + '/account'
 }
 
 Keycloak.prototype.getAccount = function (request, token) {
-    return this.getGrantManager(request).getAccount(token)
+  return this.getGrantManager(request).getAccount(token)
 }
 
 Keycloak.prototype.redirectToLogin = function (request) {
-    return !this.getConfig(request).bearerOnly
+  return !this.getConfig(request).bearerOnly
 }
+
+Keycloak.prototype.exchangeToken = function (request, options) {
+  return this.getGrantManager(request).exchangeToken(options)
+}
+
+Keycloak.prototype.getMetrics = function () {
+  return getGlobalMetrics().getStats()
+}
+
+Keycloak.prototype.resetMetrics = function () {
+  getGlobalMetrics().reset()
+}
+
+Keycloak.KeycloakMetrics = KeycloakMetrics
 
 module.exports = Keycloak

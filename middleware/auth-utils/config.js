@@ -167,6 +167,42 @@ Config.prototype.configure = function configure (config) {
    * @type {Boolean}
    */
   this.verifyTokenAudience = resolveValue(config['verify-token-audience'] || config.verifyTokenAudience || false)
+
+  /**
+   * HTTP request timeout in milliseconds
+   * @type {Number}
+   */
+  this.httpTimeout = resolveValue(config['http-timeout'] || config.httpTimeout || 30000)
+
+  /**
+   * JWKS cache TTL in seconds
+   * @type {Number}
+   */
+  this.jwksCacheTtl = resolveValue(config['jwks-cache-ttl'] || config.jwksCacheTtl || 86400)
+
+  /**
+   * Maximum retry attempts for HTTP requests
+   * @type {Number}
+   */
+  this.maxRetries = resolveValue(config['max-retries'] || config.maxRetries || 3)
+
+  /**
+   * Base delay for retry backoff in milliseconds
+   * @type {Number}
+   */
+  this.retryBaseDelay = resolveValue(config['retry-base-delay'] || config.retryBaseDelay || 1000)
+
+  /**
+   * Trusted AZP (authorized party) values for SSO scenarios
+   * @type {Array<String>}
+   */
+  this.trustedAzp = resolveValue(config['trusted-azp'] || config.trustedAzp || [])
+
+  /**
+   * Custom logger interface { debug, info, warn, error }
+   * @type {Object}
+   */
+  this.logger = config.logger || null
 }
 
 module.exports = Config
