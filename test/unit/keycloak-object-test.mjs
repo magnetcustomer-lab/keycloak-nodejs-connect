@@ -53,7 +53,7 @@ test('Should verify if login URL has the configured realm.', t => {
 })
 
 test('Should verify if login URL has the custom scope value.', t => {
-  t.equal(kc.loginUrl({kauth: {realmName: 'test-realm'}}).indexOf(kc.config.scope) > 0, true)
+  t.equal(kc.loginUrl({kauth: {realmName: 'test-realm'}}).indexOf(kc.configs['test-realm'].scope) > 0, true)
   t.end()
 })
 
