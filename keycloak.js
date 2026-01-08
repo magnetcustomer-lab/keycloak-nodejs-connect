@@ -78,9 +78,27 @@ function Keycloak(config, keycloakConfig) {
         realmConfig.idpHint = config.idpHint;
     });
 
-    this.configs = configs.reduce((previous, realmConfig) => Object.assign(previous, {[realmConfig.realm]: realmConfig}), {});
+    // Index configs by clientId instead of realm to support multiple clients per realm
+    this.configs = configs.reduce((previous, realmConfig) => Object.assign(previous, {[realmConfig.clientId]: realmConfig}), {});
 
-    this.grantManagers = configs.reduce((previous, realmConfig) => Object.assign(previous, {[realmConfig.realm]: new GrantManager(realmConfig)}), {});
+    this.grantManagers = configs.reduce((previous, realmConfig) => Object.assign(previous, {[realmConfig.clientId]: new GrantManager(realmConfig)}), {});
+
+    // Keep a map of realm -> clientIds for fallback resolution
+    this.realmToClientIds = configs.reduce((previous, realmConfig) => {
+        if (!previous[realmConfig.realm]) {
+            previous[realmConfig.realm] = [];
+        }
+        previous[realmConfig.realm].push(realmConfig.clientId);
+        return previous;
+    }, {});
+
+    // Keep a default clientId per realm (first registered)
+    this.defaultClientByRealm = configs.reduce((previous, realmConfig) => {
+        if (!previous[realmConfig.realm]) {
+            previous[realmConfig.realm] = realmConfig.clientId;
+        }
+        return previous;
+    }, {});
 
     this.stores = [BearerStore];
 
@@ -103,9 +121,27 @@ Keycloak.prototype.setConfig = function (keycloakConfig) {
         realmConfig.idpHint = this.configConnector.idpHint;
     });
 
-    this.configs = configs.reduce((previous, realmConfig) => Object.assign(previous, {[realmConfig.realm]: realmConfig}), {});
+    // Index configs by clientId instead of realm to support multiple clients per realm
+    this.configs = configs.reduce((previous, realmConfig) => Object.assign(previous, {[realmConfig.clientId]: realmConfig}), {});
 
-    this.grantManagers = configs.reduce((previous, realmConfig) => Object.assign(previous, {[realmConfig.realm]: new GrantManager(realmConfig)}), {});
+    this.grantManagers = configs.reduce((previous, realmConfig) => Object.assign(previous, {[realmConfig.clientId]: new GrantManager(realmConfig)}), {});
+
+    // Keep a map of realm -> clientIds for fallback resolution
+    this.realmToClientIds = configs.reduce((previous, realmConfig) => {
+        if (!previous[realmConfig.realm]) {
+            previous[realmConfig.realm] = [];
+        }
+        previous[realmConfig.realm].push(realmConfig.clientId);
+        return previous;
+    }, {});
+
+    // Keep a default clientId per realm (first registered)
+    this.defaultClientByRealm = configs.reduce((previous, realmConfig) => {
+        if (!previous[realmConfig.realm]) {
+            previous[realmConfig.realm] = realmConfig.clientId;
+        }
+        return previous;
+    }, {});
 
 }
 
@@ -139,11 +175,26 @@ Keycloak.prototype.middleware = function (options) {
     options.logout = options.logout || '/logout'
     options.admin = options.admin || '/'
 
-    const resolver = Object.keys(this.configs).length === 1 ? () => this.configs[Object.keys(this.configs)[0]].realm : options.realmResolve
+    // clientResolve extracts clientId from token's azp claim, falling back to configured default
+    const clientResolve = options.clientResolve || ((request) => {
+        // If only one client, use it directly
+        if (Object.keys(this.configs).length === 1) {
+            return Object.keys(this.configs)[0];
+        }
+        // Otherwise, return null to let Setup middleware extract from token
+        return null;
+    });
+
+    // realmResolve is now used for extracting realm from token issuer
+    const resolver = options.realmResolve || ((request) => {
+        // Default: extract realm from issuer or use first available
+        const firstConfig = this.configs[Object.keys(this.configs)[0]];
+        return firstConfig ? firstConfig.realm : null;
+    });
 
     const middlewares = []
 
-    middlewares.push(Setup(resolver))
+    middlewares.push(Setup(resolver, clientResolve, this))
     middlewares.push(PostAuth(this))
     middlewares.push(Admin(this, options.admin))
     middlewares.push(GrantAttacher(this))
@@ -364,11 +415,23 @@ Keycloak.prototype.getGrant = function (request, response) {
 }
 
 Keycloak.prototype.getGrantManager = function (request) {
-    return this.grantManagers[request.kauth.realmName];
+    // First try to get by clientId (preferred for multi-client per realm)
+    if (request.kauth.clientId && this.grantManagers[request.kauth.clientId]) {
+        return this.grantManagers[request.kauth.clientId];
+    }
+    // Fallback to default client for realm (legacy compatibility)
+    const defaultClientId = this.defaultClientByRealm[request.kauth.realmName];
+    return this.grantManagers[defaultClientId];
 };
 
 Keycloak.prototype.getConfig = function (request) {
-    return this.configs[request.kauth.realmName];
+    // First try to get by clientId (preferred for multi-client per realm)
+    if (request.kauth.clientId && this.configs[request.kauth.clientId]) {
+        return this.configs[request.kauth.clientId];
+    }
+    // Fallback to default client for realm (legacy compatibility)
+    const defaultClientId = this.defaultClientByRealm[request.kauth.realmName];
+    return this.configs[defaultClientId];
 };
 
 Keycloak.prototype.storeGrant = function (grant, request, response) {

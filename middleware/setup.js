@@ -15,12 +15,67 @@
  */
 'use strict'
 
-module.exports = function setup(resolver) {
+function extractTokenFromRequest(request) {
+    const authorization = request.headers.authorization || request.headers.Authorization;
+    if (!authorization) {
+        return null;
+    }
+    if (authorization.toLowerCase().startsWith('bearer')) {
+        return authorization.split(' ').pop();
+    }
+    return authorization;
+}
+
+function decodeToken(tokenString) {
+    if (!tokenString) return null;
+    try {
+        const parts = tokenString.split('.');
+        if (parts.length !== 3) return null;
+        const payload = Buffer.from(parts[1], 'base64').toString('utf8');
+        return JSON.parse(payload);
+    } catch (e) {
+        return null;
+    }
+}
+
+module.exports = function setup(realmResolver, clientResolver, keycloak) {
     return function setup(request, response, next) {
-        request.kauth = {realmName: resolver(request)};
-        if (!request.kauth.realmName) {
-            throw new Error('Realm name cannot be resolved');
+        const tokenString = extractTokenFromRequest(request);
+        const tokenPayload = decodeToken(tokenString);
+
+        let realmName = null;
+        let clientId = null;
+
+        if (tokenPayload) {
+            if (tokenPayload.iss) {
+                realmName = tokenPayload.iss.split('/').pop();
+            }
+            if (tokenPayload.azp) {
+                clientId = tokenPayload.azp;
+            }
         }
+
+        if (!realmName && realmResolver) {
+            realmName = realmResolver(request);
+        }
+
+        if (!clientId && clientResolver) {
+            clientId = clientResolver(request);
+        }
+
+        if (!clientId && realmName && keycloak && keycloak.defaultClientByRealm) {
+            clientId = keycloak.defaultClientByRealm[realmName];
+        }
+
+        if (!realmName && !clientId) {
+            throw new Error('Neither realm name nor client ID could be resolved');
+        }
+
+        request.kauth = {
+            realmName: realmName,
+            clientId: clientId
+        };
+
         next();
     };
 }

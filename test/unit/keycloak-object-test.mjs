@@ -43,27 +43,27 @@ test('setup', t => {
 })
 
 test('Should verify the realm name of the config object.', t => {
-  t.equal(kc.configs['test-realm'].realm, 'test-realm')
+  t.equal(kc.configs['nodejs-connect'].realm, 'test-realm')
   t.end()
 })
 
 test('Should verify if login URL has the configured realm.', t => {
-  t.equal(kc.loginUrl({kauth: {realmName: 'test-realm'}}).indexOf(kc.configs['test-realm'].realm) > 0, true)
+  t.equal(kc.loginUrl({kauth: {realmName: 'test-realm', clientId: 'nodejs-connect'}}).indexOf(kc.configs['nodejs-connect'].realm) > 0, true)
   t.end()
 })
 
 test('Should verify if login URL has the custom scope value.', t => {
-  t.equal(kc.loginUrl({kauth: {realmName: 'test-realm'}}).indexOf(kc.configs['test-realm'].scope) > 0, true)
+  t.equal(kc.loginUrl({kauth: {realmName: 'test-realm', clientId: 'nodejs-connect'}}).indexOf(kc.configs['nodejs-connect'].scope) > 0, true)
   t.end()
 })
 
 test('Should verify if login URL has the default scope value.', t => {
-  t.equal(kc.loginUrl({kauth: {realmName: 'test-realm'}}).indexOf('openid') > 0, true)
+  t.equal(kc.loginUrl({kauth: {realmName: 'test-realm', clientId: 'nodejs-connect'}}).indexOf('openid') > 0, true)
   t.end()
 })
 
 test('Should verify if logout URL has the configured realm.', t => {
-  t.equal(kc.logoutUrl({kauth: {realmName: 'test-realm'}}).indexOf(kc.configs['test-realm'].realm) > 0, true)
+  t.equal(kc.logoutUrl({kauth: {realmName: 'test-realm', clientId: 'nodejs-connect'}}).indexOf(kc.configs['nodejs-connect'].realm) > 0, true)
   t.end()
 })
 
@@ -74,6 +74,6 @@ test('Should generate a correct UUID.', t => {
 })
 
 test('Should produce correct account url.', t => {
-  t.equal(kc.accountUrl({kauth: {realmName: 'test-realm'}}), 'http://localhost:8080/realms/test-realm/account')
+  t.equal(kc.accountUrl({kauth: {realmName: 'test-realm', clientId: 'nodejs-connect'}}), 'http://localhost:8080/realms/test-realm/account')
   t.end()
 })
